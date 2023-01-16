@@ -183,7 +183,6 @@ new_client_setup () {
 	fi
 	key=$(wg genkey)
 	psk=$(wg genpsk)
-	network=$(grep Address /etc/wireguard/wg0.conf | cut -d',' -f 1 | grep -E -o "([0-9]{1,3}[\.]){2}[0-9]{1,3}")
 	# Configure client in the server
 	cat << EOF >> /etc/wireguard/wg0.conf
 # BEGIN_PEER $client
@@ -283,6 +282,7 @@ if [[ ! -e /etc/wireguard/wg0.conf ]]; then
 	[[ -z "$client" ]] && client="client"
 	echo
 	new_client_dns
+	new_network
 	# Set up automatic updates for BoringTun if the user is fine with that
 	if [[ "$is_container" -eq 0 ]]; then
 		echo
