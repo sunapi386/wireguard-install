@@ -137,31 +137,36 @@ new_client_dns () {
 }
 
 new_network () {
-	echo "Select a network base:"
-	echo "   1) 10.7.0"
-	echo "   2) 10.0.7"
-	echo "   3) 172.16.7"
-	echo "   4) 192.168.7"
-	read -p "Network [1]: " network
-	until [[ -z "$network" || "$network" =~ ^[1-6]$ ]]; do
-		echo "$network: invalid selection."
-		read -p "network server [1]: " network
-	done
-		# network
-	case "$network" in
-		1|"")
-			network="10.7.0"
-		;;
-		2)
-			network="10.0.7"
-		;;
-		3)
-			network="172.16.7"
-		;;
-		4)
-			network="192.168.7"
-		;;
-	esac
+	if [[ -f "/etc/wireguard/wg0.conf" ]]; then
+		network=$(grep Address /etc/wireguard/wg0.conf | cut -d',' -f 1 | grep -E -o "([0-9]{1,3}[\.]){2}[0-9]{1,3}")
+		echo "Using existing $network network."
+	else
+		echo "Select a network base:"
+		echo "   1) 10.7.0"
+		echo "   2) 10.0.7"
+		echo "   3) 172.16.7"
+		echo "   4) 192.168.7"
+		read -p "Network [1]: " network
+		until [[ -z "$network" || "$network" =~ ^[1-6]$ ]]; do
+			echo "$network: invalid selection."
+			read -p "network server [1]: " network
+		done
+			# network
+		case "$network" in
+			1|"")
+				network="10.7.0"
+			;;
+			2)
+				network="10.0.7"
+			;;
+			3)
+				network="172.16.7"
+			;;
+			4)
+				network="192.168.7"
+			;;
+		esac
+	fi
 }
 
 new_client_setup () {
