@@ -147,9 +147,88 @@ new_client_dns () {
 	esac
 }
 
+# Function to ask for WireGuard interface name, and
+# allow the user to set a custom name for the WireGuard interface (defaulting to wg0), 
+ask_for_interface_name() {
+    local default_interface="wg0"
+    local hostname_interface=$(hostname)
+    local interfaces=($(ls /etc/wireguard/*.conf 2>/dev/null | xargs -n1 basename | sed 's/\.conf$//'))
+    local selected_interface
+    local confirmed="no"
+
+    # Check and mark existing interfaces
+    for i in "${!interfaces[@]}"; do
+        if [[ -f "/etc/wireguard/${interfaces[$i]}.conf" ]]; then
+            interfaces[$i]="${interfaces[$i]} (exists)"
+        fi
+    done
+
+    # Add default and hostname interfaces to the list if they're not already there
+    if [[ ! " ${interfaces[*]} " =~ " ${default_interface} " ]]; then
+        interfaces+=("$default_interface")
+    fi
+    if [[ ! " ${interfaces[*]} " =~ " ${hostname_interface} " ]]; then
+        interfaces+=("$hostname_interface")
+    fi
+    interfaces+=("Enter a custom name")
+
+    echo "Available WireGuard interfaces:"
+    for i in "${!interfaces[@]}"; do
+        echo "$((i+1))) ${interfaces[$i]}"
+    done
+    echo
+
+    while [[ $confirmed != "yes" ]]; do
+        read -p "Select the WireGuard interface [1-${#interfaces[@]}]: " selected_index
+
+        # Validate input and handle custom name entry
+        if [[ $selected_index =~ ^[0-9]+$ ]] && [ $selected_index -ge 1 ] && [ $selected_index -le ${#interfaces[@]} ]; then
+            if [ "${interfaces[$((selected_index-1))]}" == "Enter a custom name" ]; then
+                read -p "Enter custom interface name: " selected_interface
+            else
+                selected_interface=${interfaces[$((selected_index-1))]%% *}  # Remove any additional text like '(exists)'
+            fi
+        else
+            echo "Invalid selection. Please try again."
+            continue
+        fi
+
+        # Confirm the interface name
+        read -p "You selected '${selected_interface}'. Are you sure? (yes/no) " confirmed
+        confirmed=$(echo $confirmed | tr '[:upper:]' '[:lower:]')  # Convert to lowercase
+
+        if [[ $confirmed != "yes" ]]; then
+            echo "Let's try again."
+        fi
+    done
+
+    interface_name=$selected_interface
+}
+
+# Function to list clients from a WireGuard configuration file
+list_clients() {
+    local interface_config="$1"
+    local counter=1
+
+    if [[ -f "/etc/wireguard/${interface_config}.conf" ]]; then
+        echo "Clients configured in ${interface_config}:"
+        while IFS= read -r line; do
+            if [[ $line == '# BEGIN_PEER'* ]]; then
+                local client_name=$(echo "$line" | cut -d ' ' -f 3)
+                echo "${counter}) $client_name"
+                ((counter++))
+            fi
+        done < "/etc/wireguard/${interface_config}.conf"
+    else
+        echo "No configuration file found for ${interface_config}."
+    fi
+}
+
+ask_for_interface_name
+
 new_network () {
-	if [[ -f "/etc/wireguard/wg0.conf" ]]; then
-		network=$(grep Address /etc/wireguard/wg0.conf | cut -d',' -f 1 | grep -E -o "([0-9]{1,3}[\.]){2}[0-9]{1,3}")
+	if [[ -f "/etc/wireguard/${interface_name}.conf" ]]; then
+		network=$(grep Address /etc/wireguard/${interface_name}.conf | cut -d',' -f 1 | grep -E -o "([0-9]{1,3}[\.]){2}[0-9]{1,3}")
 		echo "Using existing $network network."
 	else
 		echo "Select a network base:"
@@ -193,7 +272,7 @@ new_client_setup () {
 	# Given a list of the assigned internal IPv4 addresses, obtain the lowest still
 	# available octet. Important to start looking at 2, because 1 is our gateway.
 	octet=2
-	while grep AllowedIPs /etc/wireguard/wg0.conf | cut -d "." -f 4 | cut -d "/" -f 1 | grep -q "$octet"; do
+	while grep AllowedIPs /etc/wireguard/${interface_name}.conf | cut -d "." -f 4 | cut -d "/" -f 1 | grep -q "$octet"; do
 		(( octet++ ))
 	done
 	# Don't break the WireGuard configuration in case the address space is full
@@ -204,31 +283,31 @@ new_client_setup () {
 	key=$(wg genkey)
 	psk=$(wg genpsk)
 	# Configure client in the server
-	cat << EOF >> /etc/wireguard/wg0.conf
+	cat << EOF >> /etc/wireguard/${interface_name}.conf
 # BEGIN_PEER $client
 [Peer]
 PublicKey = $(wg pubkey <<< $key)
 PresharedKey = $psk
-AllowedIPs = $network.$octet/32$(grep -q 'fddd:2c4:2c4:2c4::1' /etc/wireguard/wg0.conf && echo ", fddd:2c4:2c4:2c4::$octet/128")
+AllowedIPs = $network.$octet/32$(grep -q 'fddd:2c4:2c4:2c4::1' /etc/wireguard/${interface_name}.conf && echo ", fddd:2c4:2c4:2c4::$octet/128")
 # END_PEER $client
 EOF
 	# Create client configuration
 	cat << EOF > ~/"$client".conf
 [Interface]
-Address = $network.$octet/24$(grep -q 'fddd:2c4:2c4:2c4::1' /etc/wireguard/wg0.conf && echo ", fddd:2c4:2c4:2c4::$octet/64")
+Address = $network.$octet/24$(grep -q 'fddd:2c4:2c4:2c4::1' /etc/wireguard/${interface_name}.conf && echo ", fddd:2c4:2c4:2c4::$octet/64")
 DNS = $dns
 PrivateKey = $key
 
 [Peer]
-PublicKey = $(grep PrivateKey /etc/wireguard/wg0.conf | cut -d " " -f 3 | wg pubkey)
+PublicKey = $(grep PrivateKey /etc/wireguard/${interface_name}.conf | cut -d " " -f 3 | wg pubkey)
 PresharedKey = $psk
 AllowedIPs = 0.0.0.0/0, ::/0
-Endpoint = $(grep '^# ENDPOINT' /etc/wireguard/wg0.conf | cut -d " " -f 3):$(grep ListenPort /etc/wireguard/wg0.conf | cut -d " " -f 3)
+Endpoint = $(grep '^# ENDPOINT' /etc/wireguard/${interface_name}.conf | cut -d " " -f 3):$(grep ListenPort /etc/wireguard/${interface_name}.conf | cut -d " " -f 3)
 PersistentKeepalive = 25
 EOF
 }
 
-if [[ ! -e /etc/wireguard/wg0.conf ]]; then
+if [[ ! -e /etc/wireguard/${interface_name}.conf ]]; then
 	# Detect some Debian minimal setups where neither wget nor curl are installed
 	if ! hash wget 2>/dev/null && ! hash curl 2>/dev/null; then
 		echo "Wget is required to use this installer."
@@ -441,8 +520,8 @@ Environment=WG_SUDO=1" > /etc/systemd/system/wg-quick@wg0.service.d/boringtun.co
 	if [[ "$firewall" == "firewalld" ]]; then
 		systemctl enable --now firewalld.service
 	fi
-	# Generate wg0.conf
-	cat << EOF > /etc/wireguard/wg0.conf
+	# Generate ${interface_name}.conf
+	cat << EOF > /etc/wireguard/${interface_name}.conf
 # Do not alter the commented lines
 # They are used by wireguard-install
 # ENDPOINT $([[ -n "$public_ip" ]] && echo "$public_ip" || echo "$ip")
@@ -453,7 +532,7 @@ PrivateKey = $(wg genkey)
 ListenPort = $port
 
 EOF
-	chmod 600 /etc/wireguard/wg0.conf
+	chmod 600 /etc/wireguard/${interface_name}.conf
 	# Enable net.ipv4.ip_forward for the system
 	echo 'net.ipv4.ip_forward=1' > /etc/sysctl.d/99-wireguard-forward.conf
 	# Enable without waiting for a reboot or service restart
@@ -577,7 +656,8 @@ EOF
 	echo "New clients can be added by running this script again."
 else
 	clear
-	echo "WireGuard is already installed."
+	echo "WireGuard is already installed for interface: $interface_name"
+	list_clients "$interface_name"
 	echo
 	echo "Select an option:"
 	echo "   1) Add a new client"
@@ -596,7 +676,7 @@ else
 			read -p "Name: " unsanitized_client
 			# Allow a limited set of characters to avoid conflicts
 			client=$(sed 's/[^0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-]/_/g' <<< "$unsanitized_client")
-			while [[ -z "$client" ]] || grep -q "^# BEGIN_PEER $client$" /etc/wireguard/wg0.conf; do
+			while [[ -z "$client" ]] || grep -q "^# BEGIN_PEER $client$" /etc/wireguard/${interface_name}.conf; do
 				echo "$client: invalid name."
 				read -p "Name: " unsanitized_client
 				client=$(sed 's/[^0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ_-]/_/g' <<< "$unsanitized_client")
@@ -606,7 +686,7 @@ else
 			new_network
 			new_client_setup
 			# Append new client configuration to the WireGuard interface
-			wg addconf wg0 <(sed -n "/^# BEGIN_PEER $client/,/^# END_PEER $client/p" /etc/wireguard/wg0.conf)
+			wg addconf wg0 <(sed -n "/^# BEGIN_PEER $client/,/^# END_PEER $client/p" /etc/wireguard/${interface_name}.conf)
 			echo
 			qrencode -t UTF8 < ~/"$client.conf"
 			echo -e '\xE2\x86\x91 That is a QR code containing your client configuration.'
@@ -619,7 +699,7 @@ else
 		2)
 			# This option could be documented a bit better and maybe even be simplified
 			# ...but what can I say, I want some sleep too
-			number_of_clients=$(grep -c '^# BEGIN_PEER' /etc/wireguard/wg0.conf)
+			number_of_clients=$(grep -c '^# BEGIN_PEER' /etc/wireguard/${interface_name}.conf)
 			if [[ "$number_of_clients" = 0 ]]; then
 				echo
 				echo "There are no existing clients!"
@@ -627,13 +707,13 @@ else
 			fi
 			echo
 			echo "Select the client to remove:"
-			grep '^# BEGIN_PEER' /etc/wireguard/wg0.conf | cut -d ' ' -f 3 | nl -s ') '
+			grep '^# BEGIN_PEER' /etc/wireguard/${interface_name}.conf | cut -d ' ' -f 3 | nl -s ') '
 			read -p "Client: " client_number
 			until [[ "$client_number" =~ ^[0-9]+$ && "$client_number" -le "$number_of_clients" ]]; do
 				echo "$client_number: invalid selection."
 				read -p "Client: " client_number
 			done
-			client=$(grep '^# BEGIN_PEER' /etc/wireguard/wg0.conf | cut -d ' ' -f 3 | sed -n "$client_number"p)
+			client=$(grep '^# BEGIN_PEER' /etc/wireguard/${interface_name}.conf | cut -d ' ' -f 3 | sed -n "$client_number"p)
 			echo
 			read -p "Confirm $client removal? [y/N]: " remove
 			until [[ "$remove" =~ ^[yYnN]*$ ]]; do
@@ -643,9 +723,9 @@ else
 			if [[ "$remove" =~ ^[yY]$ ]]; then
 				# The following is the right way to avoid disrupting other active connections:
 				# Remove from the live interface
-				wg set wg0 peer "$(sed -n "/^# BEGIN_PEER $client$/,\$p" /etc/wireguard/wg0.conf | grep -m 1 PublicKey | cut -d " " -f 3)" remove
+				wg set wg0 peer "$(sed -n "/^# BEGIN_PEER $client$/,\$p" /etc/wireguard/${interface_name}.conf | grep -m 1 PublicKey | cut -d " " -f 3)" remove
 				# Remove from the configuration file
-				sed -i "/^# BEGIN_PEER $client$/,/^# END_PEER $client$/d" /etc/wireguard/wg0.conf
+				sed -i "/^# BEGIN_PEER $client$/,/^# END_PEER $client$/d" /etc/wireguard/${interface_name}.conf
 				echo
 				echo "$client removed!"
 			else
@@ -662,7 +742,7 @@ else
 				read -p "Confirm WireGuard removal? [y/N]: " remove
 			done
 			if [[ "$remove" =~ ^[yY]$ ]]; then
-				port=$(grep '^ListenPort' /etc/wireguard/wg0.conf | cut -d " " -f 3)
+				port=$(grep '^ListenPort' /etc/wireguard/${interface_name}.conf | cut -d " " -f 3)
 				if systemctl is-active --quiet firewalld.service; then
 					ip=$(firewall-cmd --direct --get-rules ipv4 nat POSTROUTING | grep '\-s $network.0/24 '"'"'!'"'"' -d $network.0/24' | grep -oE '[^ ]+$')
 					# Using both permanent and not permanent rules to avoid a firewalld reload.
@@ -672,7 +752,7 @@ else
 					firewall-cmd --permanent --zone=trusted --remove-source=$network.0/24
 					firewall-cmd --direct --remove-rule ipv4 nat POSTROUTING 0 -s $network.0/24 ! -d $network.0/24 -j SNAT --to "$ip"
 					firewall-cmd --permanent --direct --remove-rule ipv4 nat POSTROUTING 0 -s $network.0/24 ! -d $network.0/24 -j SNAT --to "$ip"
-					if grep -qs 'fddd:2c4:2c4:2c4::1/64' /etc/wireguard/wg0.conf; then
+					if grep -qs 'fddd:2c4:2c4:2c4::1/64' /etc/wireguard/${interface_name}.conf; then
 						ip6=$(firewall-cmd --direct --get-rules ipv6 nat POSTROUTING | grep '\-s fddd:2c4:2c4:2c4::/64 '"'"'!'"'"' -d fddd:2c4:2c4:2c4::/64' | grep -oE '[^ ]+$')
 						firewall-cmd --zone=trusted --remove-source=fddd:2c4:2c4:2c4::/64
 						firewall-cmd --permanent --zone=trusted --remove-source=fddd:2c4:2c4:2c4::/64
